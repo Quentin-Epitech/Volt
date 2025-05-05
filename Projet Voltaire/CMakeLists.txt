@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(ProjetVoltaire)
+set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} "/usr/local/lib/cmake/Tesseract")
+find_package(Tesseract REQUIRED)
 
 # Options système
 if(APPLE)

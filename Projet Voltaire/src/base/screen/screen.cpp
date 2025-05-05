@@ -1,10 +1,18 @@
+// Assurez-vous d'inclure common_types.h en premier
+#include "../common_types.h"
 #include "screen.h"
+#include <algorithm>  // Pour std::min et std::max
+#include <fstream>    // Pour la manipulation de fichiers
 
-void Screen::Init(const POINT& p1, const POINT& p2)
+#ifdef MACOS
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+#include <CoreFoundation/CoreFoundation.h>
+
+void Screen::Init(const ScreenPoint& p1, const ScreenPoint& p2)
 {
     m_StartPoint = p1;
     m_EndPoint = p2;
-
     SaveScreenshot();
 }
 
@@ -17,10 +25,98 @@ void Screen::SaveScreenshot()
 {
     if (!ValidateCoordinates(m_StartPoint, m_EndPoint)) return;
 
-    int left = min(m_StartPoint.x, m_EndPoint.x);
-    int top = min(m_StartPoint.y, m_EndPoint.y);
-    int width = max(m_StartPoint.x, m_EndPoint.x) - left;
-    int height = max(m_StartPoint.y, m_EndPoint.y) - top;
+    int left = std::min(m_StartPoint.x, m_EndPoint.x);
+    int top = std::min(m_StartPoint.y, m_EndPoint.y);
+    int width = std::max(m_StartPoint.x, m_EndPoint.x) - left;
+    int height = std::max(m_StartPoint.y, m_EndPoint.y) - top;
+
+    // Capturer la partie de l'écran désignée
+    CGDirectDisplayID displayID = CGMainDisplayID();
+    
+    // Sur macOS, les coordonnées Y sont inversées par rapport à Windows
+    // L'origine est en bas à gauche au lieu d'en haut à gauche
+    CGRect displayBounds = CGDisplayBounds(displayID);
+    int macTop = displayBounds.size.height - (top + height);
+    
+    CGImageRef screenshot = CGDisplayCreateImageForRect(
+        displayID, 
+        CGRectMake(left, macTop, width, height)
+    );
+    
+    if (!screenshot) {
+        std::cerr << Logger::Error() << "Failed to capture screen area." << std::endl;
+        return;
+    }
+    
+    // Convertir et sauvegarder l'image en PNG
+    CFURLRef url = CFURLCreateWithFileSystemPath(
+        kCFAllocatorDefault,
+        CFStringCreateWithCString(kCFAllocatorDefault, m_PngPath.c_str(), kCFStringEncodingUTF8),
+        kCFURLPOSIXPathStyle,
+        false
+    );
+    
+    if (!url) {
+        std::cerr << Logger::Error() << "Failed to create URL for saving image." << std::endl;
+        CFRelease(screenshot);
+        return;
+    }
+    
+    // Format UTI pour PNG
+    CFStringRef type = CFSTR("public.png");
+    
+    // Créer un contexte de destination pour l'image
+    CGImageDestinationRef destination = CGImageDestinationCreateWithURL(
+        url,
+        type,
+        1,
+        nullptr
+    );
+    
+    if (!destination) {
+        std::cerr << Logger::Error() << "Failed to create image destination." << std::endl;
+        CFRelease(url);
+        CFRelease(screenshot);
+        return;
+    }
+    
+    // Ajouter l'image au contexte et finaliser
+    CGImageDestinationAddImage(destination, screenshot, nullptr);
+    bool success = CGImageDestinationFinalize(destination);
+    
+    // Libérer les ressources
+    CFRelease(destination);
+    CFRelease(url);
+    CFRelease(screenshot);
+    
+    if (!success) {
+        std::cerr << Logger::Error() << "Failed to save image to file." << std::endl;
+    }
+}
+
+#elif defined(WINDOWS)
+#include <windows.h>
+
+void Screen::Init(const ScreenPoint& p1, const ScreenPoint& p2)
+{
+    m_StartPoint = p1;
+    m_EndPoint = p2;
+    SaveScreenshot();
+}
+
+void Screen::Loop()
+{
+    SaveScreenshot();
+}
+
+void Screen::SaveScreenshot()
+{
+    if (!ValidateCoordinates(m_StartPoint, m_EndPoint)) return;
+
+    int left = std::min(m_StartPoint.x, m_EndPoint.x);
+    int top = std::min(m_StartPoint.y, m_EndPoint.y);
+    int width = std::max(m_StartPoint.x, m_EndPoint.x) - left;
+    int height = std::max(m_StartPoint.y, m_EndPoint.y) - top;
 
     HDC hScreenDC = GetDC(NULL);
     if (!hScreenDC)
@@ -29,32 +125,12 @@ void Screen::SaveScreenshot()
         return;
     }
 
-    HBITMAP hBitmap = CaptureScreenArea(hScreenDC, left, top, width, height);
-
-    if (!SaveBitmapToFile(hBitmap, width, height)) return;
-
-    if (hBitmap) DeleteObject(hBitmap);
-
-    ReleaseDC(NULL, hScreenDC);
-}
-
-bool Screen::ValidateCoordinates(const POINT& p1, const POINT& p2)
-{
-    if (p1.x < 0 || p1.y < 0 || p2.x < 0 || p2.y < 0)
-    {
-        std::cerr << Logger::Error() << "Coordinates cannot be negative." << std::endl;
-        return false;
-    }
-    return true;
-}
-
-HBITMAP Screen::CaptureScreenArea(HDC hScreenDC, int left, int top, int width, int height)
-{
     HDC hMemoryDC = CreateCompatibleDC(hScreenDC);
     if (!hMemoryDC)
     {
         std::cerr << Logger::Error() << "Failed to create compatible DC." << std::endl;
-        return nullptr;
+        ReleaseDC(NULL, hScreenDC);
+        return;
     }
 
     HBITMAP hBitmap = CreateCompatibleBitmap(hScreenDC, width, height);
@@ -62,7 +138,8 @@ HBITMAP Screen::CaptureScreenArea(HDC hScreenDC, int left, int top, int width, i
     {
         std::cerr << Logger::Error() << "Failed to create compatible bitmap." << std::endl;
         DeleteDC(hMemoryDC);
-        return nullptr;
+        ReleaseDC(NULL, hScreenDC);
+        return;
     }
 
     SelectObject(hMemoryDC, hBitmap);
@@ -71,20 +148,18 @@ HBITMAP Screen::CaptureScreenArea(HDC hScreenDC, int left, int top, int width, i
         std::cerr << Logger::Error() << "Failed to capture screen area." << std::endl;
         DeleteObject(hBitmap);
         DeleteDC(hMemoryDC);
-        return nullptr;
+        ReleaseDC(NULL, hScreenDC);
+        return;
     }
 
-    DeleteDC(hMemoryDC);
-    return hBitmap;
-}
-
-bool Screen::SaveBitmapToFile(HBITMAP hBitmap, int width, int height)
-{
     BITMAP bitmap;
     if (!GetObject(hBitmap, sizeof(BITMAP), &bitmap))
     {
         std::cerr << Logger::Error() << "Failed to retrieve bitmap object." << std::endl;
-        return false;
+        DeleteObject(hBitmap);
+        DeleteDC(hMemoryDC);
+        ReleaseDC(NULL, hScreenDC);
+        return;
     }
 
     int rowSize = ((width * 3 + 3) & ~3);
@@ -107,16 +182,20 @@ bool Screen::SaveBitmapToFile(HBITMAP hBitmap, int width, int height)
     if (!pixels)
     {
         std::cerr << Logger::Error() << "Memory allocation for pixel data failed." << std::endl;
-        return false;
+        DeleteObject(hBitmap);
+        DeleteDC(hMemoryDC);
+        ReleaseDC(NULL, hScreenDC);
+        return;
     }
 
-    HDC hMemoryDC = CreateCompatibleDC(GetDC(NULL));
     if (!GetDIBits(hMemoryDC, hBitmap, 0, height, pixels, reinterpret_cast<BITMAPINFO*>(&biHeader), DIB_RGB_COLORS))
     {
         std::cerr << Logger::Error() << "Failed to retrieve bitmap data." << std::endl;
         delete[] pixels;
+        DeleteObject(hBitmap);
         DeleteDC(hMemoryDC);
-        return false;
+        ReleaseDC(NULL, hScreenDC);
+        return;
     }
 
     std::ofstream outFile(m_PngPath, std::ios::binary);
@@ -124,8 +203,10 @@ bool Screen::SaveBitmapToFile(HBITMAP hBitmap, int width, int height)
     {
         std::cerr << Logger::Error() << "Failed to open output file." << std::endl;
         delete[] pixels;
+        DeleteObject(hBitmap);
         DeleteDC(hMemoryDC);
-        return false;
+        ReleaseDC(NULL, hScreenDC);
+        return;
     }
 
     outFile.write(reinterpret_cast<char*>(&bfHeader), sizeof(bfHeader));
@@ -137,6 +218,19 @@ bool Screen::SaveBitmapToFile(HBITMAP hBitmap, int width, int height)
 
     delete[] pixels;
     outFile.close();
+    DeleteObject(hBitmap);
     DeleteDC(hMemoryDC);
+    ReleaseDC(NULL, hScreenDC);
+}
+#endif
+
+// Fonction commune indépendante de la plateforme
+bool Screen::ValidateCoordinates(const ScreenPoint& p1, const ScreenPoint& p2)
+{
+    if (p1.x < 0 || p1.y < 0 || p2.x < 0 || p2.y < 0)
+    {
+        std::cerr << Logger::Error() << "Coordinates cannot be negative." << std::endl;
+        return false;
+    }
     return true;
 }
